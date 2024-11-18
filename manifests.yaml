@@ -1,0 +1,115 @@
+# 1. ConfigMap for Nginx configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: default
+data:
+  nginx.conf: |
+    events {}
+    http {
+      server {
+        listen 80;
+        
+        location /stub_status {
+          stub_status on;
+          access_log off;
+        }
+        
+        location / {
+          root /usr/share/nginx/html;
+          index index.html;
+        }
+      }
+    }
+---
+# 2. Nginx Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9113"
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+      - name: nginx-prometheus-exporter
+        image: nginx/nginx-prometheus-exporter:0.11.0
+        args:
+        - -nginx.scrape-uri=http://localhost/stub_status
+        ports:
+        - containerPort: 9113
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+---
+# 3. Service for Nginx
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+  namespace: default
+spec:
+  selector:
+    app: nginx
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+  - name: metrics
+    port: 9113
+    targetPort: 9113
+  type: ClusterIP
+---
+# 4. ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nginx-servicemonitor
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  endpoints:
+  - port: metrics
+    interval: 15s
+---
+# 5. KEDA ScaledObject
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: nginx-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    name: nginx
+    kind: Deployment
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus-operated.monitoring.svc.cluster.local
+      metricName: nginx_http_requests_total
+      threshold: '5'
+      query: sum(rate(nginx_http_requests_total{job="nginx"}[2m]))
